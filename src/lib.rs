@@ -4,10 +4,17 @@
 #![feature(maybe_uninit_slice)]
 #![feature(maybe_uninit_write_slice)]
 
-use core::{alloc::Allocator, cmp::max, mem::ManuallyDrop, mem::MaybeUninit, ptr, slice};
+use core::{
+    alloc::Allocator,
+    cmp::{max, min},
+    mem::ManuallyDrop,
+    mem::MaybeUninit,
+    ptr, slice,
+};
 use std::{
     alloc::Global,
     io::{Result, Write},
+    ops,
 };
 
 /// TODO docs
@@ -20,6 +27,71 @@ pub struct OwnedBuf<A: 'static + Allocator = Global> {
     /// The length of `self.buf` which is known to be initialized.
     init: usize,
     allocator: A,
+}
+
+impl<A: 'static + Allocator> Into<OwnedSlice<A>> for OwnedBuf<A> {
+    fn into(self) -> OwnedSlice<A> {
+        self.filled()
+    }
+}
+
+impl<A: 'static + Allocator> Into<OwnedCursor<A>> for OwnedBuf<A> {
+    fn into(self) -> OwnedCursor<A> {
+        self.unfilled()
+    }
+}
+
+pub trait UsizeRange {
+    fn absolute_indices(&self, start: usize, end: usize) -> (usize, usize);
+}
+
+impl UsizeRange for ops::Range<usize> {
+    #[inline]
+    fn absolute_indices(&self, start: usize, end: usize) -> (usize, usize) {
+        assert!(start + self.start <= end);
+        assert!(start + self.end <= end);
+        (start + self.start, start + self.end)
+    }
+}
+
+impl UsizeRange for ops::RangeFrom<usize> {
+    #[inline]
+    fn absolute_indices(&self, start: usize, end: usize) -> (usize, usize) {
+        assert!(start + self.start <= end);
+        (start + self.start, end)
+    }
+}
+
+impl UsizeRange for ops::RangeFull {
+    #[inline]
+    fn absolute_indices(&self, start: usize, end: usize) -> (usize, usize) {
+        (start, end)
+    }
+}
+
+impl UsizeRange for ops::RangeInclusive<usize> {
+    #[inline]
+    fn absolute_indices(&self, start: usize, end: usize) -> (usize, usize) {
+        assert!(start + self.start() <= end);
+        assert!(start + self.end() + 1 <= end);
+        (start + self.start(), start + self.end() + 1)
+    }
+}
+
+impl UsizeRange for ops::RangeTo<usize> {
+    #[inline]
+    fn absolute_indices(&self, start: usize, end: usize) -> (usize, usize) {
+        assert!(start + self.end <= end);
+        (start, start + self.end)
+    }
+}
+
+impl UsizeRange for ops::RangeToInclusive<usize> {
+    #[inline]
+    fn absolute_indices(&self, start: usize, end: usize) -> (usize, usize) {
+        assert!(start + self.end + 1 <= end);
+        (start, start + self.end + 1)
+    }
 }
 
 impl<A: 'static + Allocator> OwnedBuf<A> {
@@ -79,18 +151,49 @@ impl<A: 'static + Allocator> OwnedBuf<A> {
         self.init
     }
 
-    /// Returns a shared reference to the filled portion of the buffer.
+    /// TODO docs.
     #[inline]
-    pub fn filled(&self) -> &[u8] {
+    pub fn filled_bytes(&self) -> &[u8] {
         // SAFETY: We only slice the filled part of the buffer, which is always valid
         unsafe { MaybeUninit::slice_assume_init_ref(slice::from_raw_parts(self.data, self.filled)) }
     }
 
+    /// TODO docs.
+    #[inline]
+    pub fn filled(self) -> OwnedSlice<A> {
+        OwnedSlice {
+            start: 0,
+            end: self.filled,
+            buf: self,
+        }
+    }
+
+    /// TODO docs.
+    #[inline]
+    pub fn filled_slice(self, range: impl UsizeRange) -> OwnedSlice<A> {
+        let (start, end) = range.absolute_indices(0, self.filled);
+        OwnedSlice {
+            start,
+            end,
+            buf: self,
+        }
+    }
+
     /// Returns a cursor over the unfilled part of the buffer.
     #[inline]
-    pub fn unfilled(&mut self) -> OwnedCursor<'_, A> {
+    pub fn unfilled(self) -> OwnedCursor<A> {
         OwnedCursor {
-            start: self.filled,
+            end: self.capacity,
+            buf: self,
+        }
+    }
+
+    /// TODO docs.
+    #[inline]
+    pub fn unfilled_slice(self, range: ops::RangeTo<usize>) -> OwnedCursor<A> {
+        assert!(range.end >= self.filled && range.end <= self.capacity);
+        OwnedCursor {
+            end: range.end,
             buf: self,
         }
     }
@@ -166,82 +269,95 @@ impl<A: 'static + Allocator> Drop for OwnedBuf<A> {
 }
 
 /// TODO docs
-pub struct OwnedCursor<'buf, A: 'static + Allocator> {
-    buf: &'buf mut OwnedBuf<A>,
+pub struct OwnedSlice<A: 'static + Allocator> {
+    buf: OwnedBuf<A>,
+    // Invariant: start <= buf.filled
     start: usize,
+    // Invariant: end >= start && end <= buf.filled
+    end: usize,
 }
 
-impl<'a, A: 'static + Allocator> OwnedCursor<'a, A> {
-    /// Reborrow this cursor by cloning it with a smaller lifetime.
-    ///
-    /// Since a cursor maintains unique access to its underlying buffer, the borrowed cursor is
-    /// not accessible while the new cursor exists.
+/// TODO docs
+pub struct OwnedCursor<A: 'static + Allocator> {
+    buf: OwnedBuf<A>,
+    // Invariant: end >= buf.filled && end <= buf.capacity
+    end: usize,
+}
+
+impl<A: 'static + Allocator> OwnedSlice<A> {
     #[inline]
-    pub fn reborrow<'this>(&'this mut self) -> OwnedCursor<'this, A> {
-        OwnedCursor {
+    pub fn slice(self, range: impl UsizeRange) -> Self {
+        let (start, end) = range.absolute_indices(self.start, self.end);
+        OwnedSlice {
             buf: self.buf,
-            start: self.start,
+            start,
+            end,
         }
     }
 
-    /// Returns the available space in the cursor.
+    #[inline]
+    pub fn into_buf(self) -> OwnedBuf<A> {
+        self.buf
+    }
+}
+
+impl<A: 'static + Allocator> ops::Deref for OwnedSlice<A> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        // SAFETY: We only slice the filled part of the buffer, which is always valid
+        unsafe {
+            MaybeUninit::slice_assume_init_ref(slice::from_raw_parts(self.buf.data, self.end))
+        }
+    }
+}
+
+impl<A: 'static + Allocator> OwnedCursor<A> {
+    #[inline]
+    pub fn into_buf(self) -> OwnedBuf<A> {
+        self.buf
+    }
+
+    /// Returns the available space in the slice.
     #[inline]
     pub fn capacity(&self) -> usize {
-        self.buf.capacity - self.buf.filled
+        self.end - self.buf.filled
     }
 
-    /// Returns the number of bytes written to this cursor since it was created from a `BorrowedBuf`.
-    ///
-    /// Note that if this cursor is a reborrowed clone of another, then the count returned is the
-    /// count written via either cursor, not the count since the cursor was reborrowed.
-    #[inline]
-    pub fn written(&self) -> usize {
-        self.buf.filled - self.start
-    }
-
-    /// Returns a shared reference to the initialized portion of the cursor.
-    #[inline]
-    pub fn init_ref(&self) -> &[u8] {
-        let filled = self.buf.filled;
-        // SAFETY: We only slice the initialized part of the buffer, which is always valid
-        unsafe {
-            MaybeUninit::slice_assume_init_ref(
-                &slice::from_raw_parts(self.buf.data, self.buf.init)[filled..],
-            )
-        }
-    }
-
-    /// Returns a mutable reference to the initialized portion of the cursor.
+    /// Returns a mutable reference to the initialized portion of the slice.
     #[inline]
     pub fn init_mut(&mut self) -> &mut [u8] {
-        let filled = self.buf.filled;
-        let init = self.buf.init;
+        let start = self.buf.filled;
+        let end = min(self.end, self.buf.init);
+
         // SAFETY: We only slice the initialized part of the buffer, which is always valid
-        unsafe { MaybeUninit::slice_assume_init_mut(&mut self.buf_as_slice()[filled..init]) }
+        unsafe { MaybeUninit::slice_assume_init_mut(&mut self.buf_as_bytes()[start..end]) }
     }
 
-    /// Returns a mutable reference to the uninitialized part of the cursor.
+    /// Returns a mutable reference to the uninitialized part of the slice.
     ///
     /// It is safe to uninitialize any of these bytes.
     #[inline]
     pub fn uninit_mut(&mut self) -> &mut [MaybeUninit<u8>] {
-        let init = self.buf.init;
-        unsafe { &mut self.buf_as_slice()[init..] }
+        let start = self.buf.init;
+        let end = max(self.end, self.buf.init);
+        unsafe { &mut self.buf_as_bytes()[start..end] }
     }
 
-    /// Returns a mutable reference to the whole cursor.
+    /// Returns a mutable reference to the whole slice.
     ///
     /// # Safety
     ///
-    /// The caller must not uninitialize any bytes in the initialized portion of the cursor.
+    /// The caller must not uninitialize any bytes in the initialized portion of the slice.
     #[inline]
     pub unsafe fn as_mut(&mut self) -> &mut [MaybeUninit<u8>] {
-        let filled = self.buf.filled;
-        &mut self.buf_as_slice()[filled..]
+        let start = self.buf.filled;
+        let end = self.end;
+        &mut self.buf_as_bytes()[start..end]
     }
 
     #[inline]
-    unsafe fn buf_as_slice(&mut self) -> &mut [MaybeUninit<u8>] {
+    unsafe fn buf_as_bytes(&mut self) -> &mut [MaybeUninit<u8>] {
         slice::from_raw_parts_mut(self.buf.data, self.buf.capacity)
     }
 
@@ -262,56 +378,55 @@ impl<'a, A: 'static + Allocator> OwnedCursor<'a, A> {
         self
     }
 
-    /// Initializes all bytes in the cursor.
+    /// Initializes all bytes in the slice.
     #[inline]
     pub fn ensure_init(&mut self) -> &mut Self {
         for byte in self.uninit_mut() {
             byte.write(0);
         }
-        self.buf.init = self.buf.capacity;
+        self.buf.init = max(self.end, self.buf.init);
 
         self
     }
 
-    /// Asserts that the first `n` unfilled bytes of the cursor are initialized.
+    /// Asserts that the first `n` unfilled bytes of the slice are initialized.
     ///
-    /// `BorrowedBuf` assumes that bytes are never de-initialized, so this method does nothing when
+    /// `OwnedBuf` assumes that bytes are never de-initialized, so this method does nothing when
     /// called with fewer bytes than are already known to be initialized.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the first `n` bytes of the buffer have already been initialized.
+    /// The caller must ensure that the first `n` bytes of the slice have already been initialized.
     #[inline]
     pub unsafe fn set_init(&mut self, n: usize) -> &mut Self {
         self.buf.init = max(self.buf.init, self.buf.filled + n);
         self
     }
 
-    /// Appends data to the cursor, advancing position within its buffer.
+    /// Copies `data` to the start of the slice and advances the slice (TODO what does that mean?)
     ///
     /// # Panics
     ///
     /// Panics if `self.capacity()` is less than `buf.len()`.
     #[inline]
-    pub fn append(&mut self, buf: &[u8]) {
-        assert!(self.capacity() >= buf.len());
+    pub fn write_slice(&mut self, data: &[u8]) {
+        assert!(self.capacity() >= data.len());
 
         // SAFETY: we do not de-initialize any of the elements of the slice
         unsafe {
-            MaybeUninit::write_slice(&mut self.as_mut()[..buf.len()], buf);
+            MaybeUninit::write_slice(&mut self.as_mut()[..data.len()], data);
         }
 
-        // SAFETY: We just added the entire contents of buf to the filled section.
+        // SAFETY: We just added the entire contents of data.
         unsafe {
-            self.set_init(buf.len());
+            self.advance(data.len());
         }
-        self.buf.filled += buf.len();
     }
 }
 
-impl<'a, A: 'static + Allocator> Write for OwnedCursor<'a, A> {
+impl<A: 'static + Allocator> Write for OwnedCursor<A> {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        self.append(buf);
+        self.write_slice(buf);
         Ok(buf.len())
     }
 
@@ -327,8 +442,15 @@ mod tests {
     #[test]
     fn owned_buf_smoke() {
         let v: Vec<u8> = vec![1, 2, 3];
-        let mut buf: OwnedBuf = v.into();
-        assert_eq!(buf.filled(), &[1, 2, 3]);
-        let _cursor = buf.unfilled();
+        let buf: OwnedBuf = v.into();
+        let filled = buf.filled();
+        assert_eq!(&*filled, &[1, 2, 3]);
+        let mut buf = filled.into_buf();
+        buf.clear();
+        assert_eq!(buf.filled_bytes().len(), 0);
+        let mut cursor = buf.unfilled();
+        cursor.write_slice(&[6, 5, 4]);
+        let v = unsafe { cursor.into_buf().into_vec() };
+        assert_eq!(&*v, &[6, 5, 4]);
     }
 }
