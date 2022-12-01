@@ -426,8 +426,9 @@ impl<A: 'static + Allocator> OwnedCursor<A> {
 
 impl<A: 'static + Allocator> Write for OwnedCursor<A> {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        self.write_slice(buf);
-        Ok(buf.len())
+        let len = min(self.capacity(), buf.len());
+        self.write_slice(&buf[..len]);
+        Ok(len)
     }
 
     fn flush(&mut self) -> Result<()> {
