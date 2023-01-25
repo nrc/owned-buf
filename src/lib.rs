@@ -29,6 +29,10 @@
 //! calls a function supplied when the buffer is created. Typically, that converts the buffer into
 //! the original sequence type and calls it destructor.
 //!
+//! ### Destructor safety
+//!
+//! TODO
+//!
 //! ## Conversion from user types
 //!
 //! This module includes functionality to transform an `OwnedBuf` from and to a `Vec<u8>` or
@@ -59,8 +63,7 @@
 use core::{
     alloc::Allocator,
     cmp::{max, min},
-    mem::ManuallyDrop,
-    mem::MaybeUninit,
+    mem::{ManuallyDrop, MaybeUninit},
     ops, ptr, slice,
 };
 use std::{
@@ -91,7 +94,7 @@ use std::{
 /// the buffer using and `OwnedCursor`. Both of these types can be converted back into an `OwnedBuf`.
 pub struct OwnedBuf<A: 'static + Allocator = Global> {
     data: *mut MaybeUninit<u8>,
-    dtor: &'static dyn Fn(&mut OwnedBuf<A>),
+    dtor: unsafe fn(&mut OwnedBuf<A>),
     capacity: usize,
     /// The length of `self.data` which is known to be filled.
     filled: usize,
@@ -114,10 +117,14 @@ impl<A: 'static + Allocator> Into<OwnedCursor<A>> for OwnedBuf<A> {
 
 impl<A: 'static + Allocator> OwnedBuf<A> {
     /// Create a new OwnedBuf.
+    ///
+    /// # Safety
+    ///
+    /// See module docs for safety requirements on the destructor function.
     #[inline]
     pub fn new(
         data: *mut MaybeUninit<u8>,
-        dtor: &'static dyn Fn(&mut OwnedBuf),
+        dtor: unsafe fn(&mut OwnedBuf),
         capacity: usize,
         filled: usize,
         init: usize,
@@ -126,10 +133,14 @@ impl<A: 'static + Allocator> OwnedBuf<A> {
     }
 
     /// Create a new OwnedBuf with a specific allocator.
+    ///
+    /// # Safety
+    ///
+    /// See module docs for safety requirements on the destructor function.
     #[inline]
     pub fn new_in(
         data: *mut MaybeUninit<u8>,
-        dtor: &'static dyn Fn(&mut OwnedBuf<A>),
+        dtor: unsafe fn(&mut OwnedBuf<A>),
         capacity: usize,
         filled: usize,
         init: usize,
@@ -152,10 +163,9 @@ impl<A: 'static + Allocator> OwnedBuf<A> {
     /// It is only safe to use this method if the buffer was created from a `Vec<u8, A>`.
     #[inline]
     pub unsafe fn into_vec(self) -> Vec<u8, A> {
-        let this = ManuallyDrop::new(self);
-        Vec::from_raw_parts_in(this.data as *mut u8, this.filled, this.capacity, unsafe {
-            ptr::read(&this.allocator)
-        })
+        let a = unsafe { ptr::read(&self.allocator) };
+        let (data, _, filled, _, capacity) = self.into_raw_parts();
+        Vec::from_raw_parts_in(data as *mut u8, filled, capacity, a)
     }
 
     /// Convert this buffer into a `Vec` of `MaybeUninit<u8>`.
@@ -165,10 +175,9 @@ impl<A: 'static + Allocator> OwnedBuf<A> {
     /// It is only safe to use this method if the buffer was created from a `Vec<MaybeUninit<u8>, A>`.
     #[inline]
     pub unsafe fn into_maybe_uninit_vec(self) -> Vec<MaybeUninit<u8>, A> {
-        let this = ManuallyDrop::new(self);
-        Vec::from_raw_parts_in(this.data, this.filled, this.capacity, unsafe {
-            ptr::read(&this.allocator)
-        })
+        let a = unsafe { ptr::read(&self.allocator) };
+        let (data, _, filled, _, capacity) = self.into_raw_parts();
+        Vec::from_raw_parts_in(data, filled, capacity, a)
     }
 
     /// Returns the length of the initialized part of the buffer.
@@ -253,23 +262,43 @@ impl<A: 'static + Allocator> OwnedBuf<A> {
         self.init = max(self.init, n);
         self
     }
+
+    /// Decomposes this `OwnedBuf` into its raw components.
+    ///
+    /// returns `(data, dtor, filled, init, capacity)` where `data` is a pointer to the buffer's
+    /// data in memory, `dtor` is the buffer's destructor function, `filled` is the number of bytes
+    /// which are filled with data, `init` is the number of bytes which have been initialised (i.e.,
+    /// which are safe to treat as `u8` rather than `MaybeUninit<u8>`), and `capacity` is the total
+    /// length of the buffer. `filled <= init <= capacity`.
+    ///
+    /// # Safety
+    ///
+    /// See module docs for safety requirements on the returned destructor function.
+    // TODO allocator version
+    #[inline]
+    pub fn into_raw_parts(
+        self,
+    ) -> (
+        *mut MaybeUninit<u8>,
+        unsafe fn(&mut OwnedBuf<A>),
+        usize,
+        usize,
+        usize,
+    ) {
+        let this = ManuallyDrop::new(self);
+        (this.data, this.dtor, this.filled, this.init, this.capacity)
+    }
 }
 
 impl<A: 'static + Allocator> Drop for OwnedBuf<A> {
     fn drop(&mut self) {
-        (self.dtor)(self)
+        unsafe { (self.dtor)(self) }
     }
 }
 
-fn drop_vec<A: 'static + Allocator>(buf: &mut OwnedBuf<A>) {
-    let _vec = unsafe {
-        Vec::from_raw_parts_in(
-            buf.data,
-            buf.filled,
-            buf.capacity,
-            ptr::read(&buf.allocator),
-        )
-    };
+unsafe fn drop_vec<A: 'static + Allocator>(buf: &mut OwnedBuf<A>) {
+    let (data, _, filled, _, capacity) = unsafe { ptr::read(buf) }.into_raw_parts();
+    let _vec = unsafe { Vec::from_raw_parts_in(data, filled, capacity, ptr::read(&buf.allocator)) };
 }
 
 impl<A: 'static + Allocator> From<Vec<MaybeUninit<u8>, A>> for OwnedBuf<A> {
@@ -277,7 +306,7 @@ impl<A: 'static + Allocator> From<Vec<MaybeUninit<u8>, A>> for OwnedBuf<A> {
         let (data, len, capacity, allocator) = v.into_raw_parts_with_alloc();
         OwnedBuf {
             data,
-            dtor: &drop_vec,
+            dtor: drop_vec,
             capacity,
             filled: len,
             init: len,
@@ -291,7 +320,7 @@ impl<A: 'static + Allocator> From<Vec<u8, A>> for OwnedBuf<A> {
         let (data, len, capacity, allocator) = v.into_raw_parts_with_alloc();
         OwnedBuf {
             data: data as *mut MaybeUninit<u8>,
-            dtor: &drop_vec,
+            dtor: drop_vec,
             capacity,
             filled: len,
             init: len,
