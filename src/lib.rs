@@ -47,29 +47,21 @@
 //! [`std::ptr::read`] to get the `OwnedBuf` by value, transform it into the original sequence type,
 //! and (implicitly) call its destructor.
 //!
-//! ## Allocators
-//!
-//! FIXME(#4)
-//!
 //! # Examples
 //!
 //! TODO
 //! create from Vec, write into it, read out of it, convert back to Vec, dtor
 
-#![feature(allocator_api)]
 #![feature(maybe_uninit_slice)]
 #![feature(maybe_uninit_write_slice)]
+#![feature(vec_into_raw_parts)]
 
 use core::{
-    alloc::Allocator,
     cmp::{max, min},
     mem::{ManuallyDrop, MaybeUninit},
     ops, ptr, slice,
 };
-use std::{
-    alloc::Global,
-    io::{Result, Write},
-};
+use std::io::{Result, Write};
 
 /// An owned, fixed length buffer of bytes.
 ///
@@ -92,30 +84,29 @@ use std::{
 /// The API of `OwnedBuf` is focussed on creation and destruction. To read from the filled part,
 /// get a view of the buffer using an `OwnedSlice`. To write into the unfilled part, get a view of
 /// the buffer using and `OwnedCursor`. Both of these types can be converted back into an `OwnedBuf`.
-pub struct OwnedBuf<A: 'static + Allocator = Global> {
+pub struct OwnedBuf {
     data: *mut MaybeUninit<u8>,
-    dtor: unsafe fn(&mut OwnedBuf<A>),
+    dtor: unsafe fn(&mut OwnedBuf),
     capacity: usize,
     /// The length of `self.data` which is known to be filled.
     filled: usize,
     /// The length of `self.data` which is known to be initialized.
     init: usize,
-    allocator: A,
 }
 
-impl<A: 'static + Allocator> Into<OwnedSlice<A>> for OwnedBuf<A> {
-    fn into(self) -> OwnedSlice<A> {
+impl Into<OwnedSlice> for OwnedBuf {
+    fn into(self) -> OwnedSlice {
         self.filled()
     }
 }
 
-impl<A: 'static + Allocator> Into<OwnedCursor<A>> for OwnedBuf<A> {
-    fn into(self) -> OwnedCursor<A> {
+impl Into<OwnedCursor> for OwnedBuf {
+    fn into(self) -> OwnedCursor {
         self.unfilled()
     }
 }
 
-impl<A: 'static + Allocator> OwnedBuf<A> {
+impl OwnedBuf {
     /// Create a new OwnedBuf.
     ///
     /// # Safety
@@ -128,31 +119,13 @@ impl<A: 'static + Allocator> OwnedBuf<A> {
         capacity: usize,
         filled: usize,
         init: usize,
-    ) -> OwnedBuf<Global> {
-        OwnedBuf::new_in(data, dtor, capacity, filled, init, Global)
-    }
-
-    /// Create a new OwnedBuf with a specific allocator.
-    ///
-    /// # Safety
-    ///
-    /// See module docs for safety requirements on the destructor function.
-    #[inline]
-    pub fn new_in(
-        data: *mut MaybeUninit<u8>,
-        dtor: unsafe fn(&mut OwnedBuf<A>),
-        capacity: usize,
-        filled: usize,
-        init: usize,
-        allocator: A,
-    ) -> OwnedBuf<A> {
+    ) -> OwnedBuf {
         OwnedBuf {
             data,
             dtor,
             capacity,
             filled,
             init,
-            allocator,
         }
     }
 
@@ -160,24 +133,22 @@ impl<A: 'static + Allocator> OwnedBuf<A> {
     ///
     /// # Safety
     ///
-    /// It is only safe to use this method if the buffer was created from a `Vec<u8, A>`.
+    /// It is only safe to use this method if the buffer was created from a `Vec<u8>`.
     #[inline]
-    pub unsafe fn into_vec(self) -> Vec<u8, A> {
-        let a = unsafe { ptr::read(&self.allocator) };
+    pub unsafe fn into_vec(self) -> Vec<u8> {
         let (data, _, filled, _, capacity) = self.into_raw_parts();
-        Vec::from_raw_parts_in(data as *mut u8, filled, capacity, a)
+        Vec::from_raw_parts(data as *mut u8, filled, capacity)
     }
 
     /// Convert this buffer into a `Vec` of `MaybeUninit<u8>`.
     ///
     /// # Safety
     ///
-    /// It is only safe to use this method if the buffer was created from a `Vec<MaybeUninit<u8>, A>`.
+    /// It is only safe to use this method if the buffer was created from a `Vec<MaybeUninit<u8>>`.
     #[inline]
-    pub unsafe fn into_maybe_uninit_vec(self) -> Vec<MaybeUninit<u8>, A> {
-        let a = unsafe { ptr::read(&self.allocator) };
+    pub unsafe fn into_maybe_uninit_vec(self) -> Vec<MaybeUninit<u8>> {
         let (data, _, filled, _, capacity) = self.into_raw_parts();
-        Vec::from_raw_parts_in(data, filled, capacity, a)
+        Vec::from_raw_parts(data, filled, capacity)
     }
 
     /// Returns the length of the initialized part of the buffer.
@@ -188,7 +159,7 @@ impl<A: 'static + Allocator> OwnedBuf<A> {
 
     /// Returns an `OwnedSlice` covering the filled part of this buffer.
     #[inline]
-    pub fn filled(self) -> OwnedSlice<A> {
+    pub fn filled(self) -> OwnedSlice {
         OwnedSlice {
             start: 0,
             end: self.filled,
@@ -204,7 +175,7 @@ impl<A: 'static + Allocator> OwnedBuf<A> {
     ///
     /// This function will panic if `range` is outside the bounds of the filled part of the buffer.
     #[inline]
-    pub fn filled_slice(self, range: impl UsizeRange) -> OwnedSlice<A> {
+    pub fn filled_slice(self, range: impl UsizeRange) -> OwnedSlice {
         let (start, end) = range.absolute_indices(0, self.filled);
         OwnedSlice {
             start,
@@ -215,7 +186,7 @@ impl<A: 'static + Allocator> OwnedBuf<A> {
 
     /// Returns a cursor over the unfilled part of the buffer.
     #[inline]
-    pub fn unfilled(self) -> OwnedCursor<A> {
+    pub fn unfilled(self) -> OwnedCursor {
         OwnedCursor {
             end: self.capacity,
             buf: self,
@@ -232,7 +203,7 @@ impl<A: 'static + Allocator> OwnedBuf<A> {
     /// Where `buf` has a capacity (total length) of 16 bytes and the first 4 bytes are filled,
     /// `buf.unfilled_slice(..8)` will return a cursor over the first 4 unfilled bytes.
     #[inline]
-    pub fn unfilled_slice(self, range: ops::RangeTo<usize>) -> OwnedCursor<A> {
+    pub fn unfilled_slice(self, range: ops::RangeTo<usize>) -> OwnedCursor {
         assert!(range.end >= self.filled && range.end <= self.capacity);
         OwnedCursor {
             end: range.end,
@@ -265,7 +236,7 @@ impl<A: 'static + Allocator> OwnedBuf<A> {
 
     /// Decomposes this `OwnedBuf` into its raw components.
     ///
-    /// returns `(data, dtor, filled, init, capacity)` where `data` is a pointer to the buffer's
+    /// Returns `(data, dtor, filled, init, capacity)` where `data` is a pointer to the buffer's
     /// data in memory, `dtor` is the buffer's destructor function, `filled` is the number of bytes
     /// which are filled with data, `init` is the number of bytes which have been initialised (i.e.,
     /// which are safe to treat as `u8` rather than `MaybeUninit<u8>`), and `capacity` is the total
@@ -274,13 +245,12 @@ impl<A: 'static + Allocator> OwnedBuf<A> {
     /// # Safety
     ///
     /// See module docs for safety requirements on the returned destructor function.
-    // TODO allocator version
     #[inline]
     pub fn into_raw_parts(
         self,
     ) -> (
         *mut MaybeUninit<u8>,
-        unsafe fn(&mut OwnedBuf<A>),
+        unsafe fn(&mut OwnedBuf),
         usize,
         usize,
         usize,
@@ -290,41 +260,39 @@ impl<A: 'static + Allocator> OwnedBuf<A> {
     }
 }
 
-impl<A: 'static + Allocator> Drop for OwnedBuf<A> {
+impl Drop for OwnedBuf {
     fn drop(&mut self) {
         unsafe { (self.dtor)(self) }
     }
 }
 
-unsafe fn drop_vec<A: 'static + Allocator>(buf: &mut OwnedBuf<A>) {
+unsafe fn drop_vec(buf: &mut OwnedBuf) {
     let (data, _, filled, _, capacity) = unsafe { ptr::read(buf) }.into_raw_parts();
-    let _vec = unsafe { Vec::from_raw_parts_in(data, filled, capacity, ptr::read(&buf.allocator)) };
+    let _vec = unsafe { Vec::from_raw_parts(data, filled, capacity) };
 }
 
-impl<A: 'static + Allocator> From<Vec<MaybeUninit<u8>, A>> for OwnedBuf<A> {
-    fn from(v: Vec<MaybeUninit<u8>, A>) -> OwnedBuf<A> {
-        let (data, len, capacity, allocator) = v.into_raw_parts_with_alloc();
+impl From<Vec<MaybeUninit<u8>>> for OwnedBuf {
+    fn from(v: Vec<MaybeUninit<u8>>) -> OwnedBuf {
+        let (data, len, capacity) = v.into_raw_parts();
         OwnedBuf {
             data,
             dtor: drop_vec,
             capacity,
             filled: len,
             init: len,
-            allocator,
         }
     }
 }
 
-impl<A: 'static + Allocator> From<Vec<u8, A>> for OwnedBuf<A> {
-    fn from(v: Vec<u8, A>) -> OwnedBuf<A> {
-        let (data, len, capacity, allocator) = v.into_raw_parts_with_alloc();
+impl From<Vec<u8>> for OwnedBuf {
+    fn from(v: Vec<u8>) -> OwnedBuf {
+        let (data, len, capacity) = v.into_raw_parts();
         OwnedBuf {
             data: data as *mut MaybeUninit<u8>,
             dtor: drop_vec,
             capacity,
             filled: len,
             init: len,
-            allocator,
         }
     }
 }
@@ -345,15 +313,15 @@ impl<A: 'static + Allocator> From<Vec<u8, A>> for OwnedBuf<A> {
 /// let slice = buf.filled();
 /// assert_eq!(slice[1], 2);
 /// ```
-pub struct OwnedSlice<A: 'static + Allocator> {
-    buf: OwnedBuf<A>,
+pub struct OwnedSlice {
+    buf: OwnedBuf,
     // Invariant: start <= buf.filled
     start: usize,
     // Invariant: end >= start && end <= buf.filled
     end: usize,
 }
 
-impl<A: 'static + Allocator> OwnedSlice<A> {
+impl OwnedSlice {
     /// Take an (owned) subslice of this `OwnedSlice`.
     #[inline]
     pub fn slice(self, range: impl UsizeRange) -> Self {
@@ -367,12 +335,12 @@ impl<A: 'static + Allocator> OwnedSlice<A> {
 
     /// Convert this slice back into an `OwnedBuf`.
     #[inline]
-    pub fn into_buf(self) -> OwnedBuf<A> {
+    pub fn into_buf(self) -> OwnedBuf {
         self.buf
     }
 }
 
-impl<A: 'static + Allocator> ops::Deref for OwnedSlice<A> {
+impl ops::Deref for OwnedSlice {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
@@ -394,16 +362,16 @@ impl<A: 'static + Allocator> ops::Deref for OwnedSlice<A> {
 ///
 /// An `OwnedCursor` takes ownership of the `OwnedBuf` when it is created. It can always be converted
 /// back into and `OwnedBuf`.
-pub struct OwnedCursor<A: 'static + Allocator> {
-    buf: OwnedBuf<A>,
+pub struct OwnedCursor {
+    buf: OwnedBuf,
     // Invariant: end >= buf.filled && end <= buf.capacity
     end: usize,
 }
 
-impl<A: 'static + Allocator> OwnedCursor<A> {
+impl OwnedCursor {
     /// Convert this cursor back into its underlying buffer.
     #[inline]
-    pub fn into_buf(self) -> OwnedBuf<A> {
+    pub fn into_buf(self) -> OwnedBuf {
         self.buf
     }
 
@@ -513,7 +481,7 @@ impl<A: 'static + Allocator> OwnedCursor<A> {
     }
 }
 
-impl<A: 'static + Allocator> Write for OwnedCursor<A> {
+impl Write for OwnedCursor {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         let len = min(self.capacity(), buf.len());
         self.write_slice(&buf[..len]);
