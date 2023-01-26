@@ -41,8 +41,8 @@
 //! This module includes functionality to transform an `OwnedBuf` from and to a `Vec<u8>` or
 //! `Vec<MaybeUninit<u8>>`. `OwnedBuf` is designed to be usable with any owned sequence of bytes. To
 //! create an `OwnedBuf` use [`OwnedBuf::new`], you'll supply a data pointer, some metadata, and a
-//! destructor function (see below). To transform from an `OwnedBuf`, you use FIXME(#9) to get the
-//! internal state of the `OwnedBuf` and then create the sequence type in the usual way.
+//! destructor function (see below). To transform from an `OwnedBuf`, you use `into_raw_parts` to
+//! get the internal state of the `OwnedBuf` and then create the sequence type in the usual way.
 //!
 //! An `OwnedBuf`'s destructor function has type `&'static dyn Fn(&mut OwnedBuf<A>)`, it passes a
 //! mutable reference to the destructor, however, it is guaranteed that the `OwnedBuf` will not be
@@ -52,8 +52,41 @@
 //!
 //! # Examples
 //!
-//! TODO
-//! create from Vec, write into it, read out of it, convert back to Vec, dtor
+//! Creating an `OwnedBuf` from a `Vec`.
+//!
+//! ```
+//! # use owned_buf::OwnedBuf;
+//! let vec = vec![1u8, 2, 3];
+//! let buf: OwnedBuf = vec.into();
+//!
+//! // Use `filled` to view `buf` as an `OwnedSlice` to read from it.
+//! assert_eq!(1, buf.filled()[0]);
+//!
+//! // `Vec`'s destructor will be called via `OwnedBuf`'s.
+//! ```
+//!
+//! Writing into an `OwnedBuf` and converting it back into a `Vec`.
+//!
+//! ```
+//! # use owned_buf::OwnedBuf;
+//! let vec: Vec<u8> = Vec::with_capacity(8);
+//! let buf: OwnedBuf = vec.into();
+//! assert_eq!(0, buf.filled_len());
+//! assert_eq!(8, buf.capacity());
+//!
+//! // Get a cursor to write into the `OwnedBuf`.
+//! let mut cursor = buf.unfilled();
+//! cursor.write_slice(&[0, 1, 2, 3]);
+//!
+//! // Convert the cursor back into an `OwnedBuf`.
+//! let buf = cursor.into_buf();
+//! assert_eq!(4, buf.filled_len());
+//!
+//! let vec = unsafe { buf.into_vec() };
+//! assert_eq!(4, vec.len());
+//! assert_eq!(8, vec.capacity());
+//! assert_eq!(3, vec[3]);
+//! ```
 
 #![feature(maybe_uninit_slice)]
 #![feature(maybe_uninit_write_slice)]
@@ -152,6 +185,18 @@ impl OwnedBuf {
     pub unsafe fn into_maybe_uninit_vec(self) -> Vec<MaybeUninit<u8>> {
         let (data, _, filled, _, capacity) = self.into_raw_parts();
         Vec::from_raw_parts(data, filled, capacity)
+    }
+
+    /// Returns the total size of the buffer.
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Returns the length of the filled part of the buffer.
+    #[inline]
+    pub fn filled_len(&self) -> usize {
+        self.filled
     }
 
     /// Returns the length of the initialized part of the buffer.
