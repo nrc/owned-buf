@@ -31,7 +31,10 @@
 //!
 //! ### Destructor safety
 //!
-//! TODO
+//! An `OwnedBuf` takes a destructor as a function pointer and calls it from the `OwnedBuf`'s
+//! destructor. The function pointer is marked as `unsafe` and the safety invariant is that the
+//! `OwnedBuf` was created from the collection type expected by the destructor function. This
+//! invariant must be ensured when the `OwnedBuf` is created, thus `OwnedBuf::new` is `unsafe`.
 //!
 //! ## Conversion from user types
 //!
@@ -111,9 +114,9 @@ impl OwnedBuf {
     ///
     /// # Safety
     ///
-    /// See module docs for safety requirements on the destructor function.
+    /// See module docs for safety requirements.
     #[inline]
-    pub fn new(
+    pub unsafe fn new(
         data: *mut MaybeUninit<u8>,
         dtor: unsafe fn(&mut OwnedBuf),
         capacity: usize,
@@ -268,7 +271,7 @@ impl Drop for OwnedBuf {
 
 unsafe fn drop_vec(buf: &mut OwnedBuf) {
     let (data, _, filled, _, capacity) = unsafe { ptr::read(buf) }.into_raw_parts();
-    let _vec = unsafe { Vec::from_raw_parts(data, filled, capacity) };
+    let _vec = Vec::from_raw_parts(data, filled, capacity);
 }
 
 impl From<Vec<MaybeUninit<u8>>> for OwnedBuf {
