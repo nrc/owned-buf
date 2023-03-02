@@ -123,6 +123,7 @@ use std::io::{Result, Write};
 pub struct OwnedBuf {
     data: *mut MaybeUninit<u8>,
     dtor: unsafe fn(&mut OwnedBuf),
+    user_data: *const (),
     capacity: usize,
     /// The length of `self.data` which is known to be filled.
     filled: usize,
@@ -152,6 +153,7 @@ impl OwnedBuf {
     pub unsafe fn new(
         data: *mut MaybeUninit<u8>,
         dtor: unsafe fn(&mut OwnedBuf),
+        user_data: *const (),
         capacity: usize,
         filled: usize,
         init: usize,
@@ -159,6 +161,7 @@ impl OwnedBuf {
         OwnedBuf {
             data,
             dtor,
+            user_data,
             capacity,
             filled,
             init,
@@ -172,7 +175,7 @@ impl OwnedBuf {
     /// It is only safe to use this method if the buffer was created from a `Vec<u8>`.
     #[inline]
     pub unsafe fn into_vec(self) -> Vec<u8> {
-        let (data, _, filled, _, capacity) = self.into_raw_parts();
+        let (data, _, _, filled, _, capacity) = self.into_raw_parts();
         Vec::from_raw_parts(data as *mut u8, filled, capacity)
     }
 
@@ -183,7 +186,7 @@ impl OwnedBuf {
     /// It is only safe to use this method if the buffer was created from a `Vec<MaybeUninit<u8>>`.
     #[inline]
     pub unsafe fn into_maybe_uninit_vec(self) -> Vec<MaybeUninit<u8>> {
-        let (data, _, filled, _, capacity) = self.into_raw_parts();
+        let (data, _, _, filled, _, capacity) = self.into_raw_parts();
         Vec::from_raw_parts(data, filled, capacity)
     }
 
@@ -299,12 +302,20 @@ impl OwnedBuf {
     ) -> (
         *mut MaybeUninit<u8>,
         unsafe fn(&mut OwnedBuf),
+        *const (),
         usize,
         usize,
         usize,
     ) {
         let this = ManuallyDrop::new(self);
-        (this.data, this.dtor, this.filled, this.init, this.capacity)
+        (
+            this.data,
+            this.dtor,
+            this.user_data,
+            this.filled,
+            this.init,
+            this.capacity,
+        )
     }
 }
 
@@ -315,7 +326,7 @@ impl Drop for OwnedBuf {
 }
 
 unsafe fn drop_vec(buf: &mut OwnedBuf) {
-    let (data, _, filled, _, capacity) = unsafe { ptr::read(buf) }.into_raw_parts();
+    let (data, _, _, filled, _, capacity) = unsafe { ptr::read(buf) }.into_raw_parts();
     let _vec = Vec::from_raw_parts(data, filled, capacity);
 }
 
@@ -325,6 +336,7 @@ impl From<Vec<MaybeUninit<u8>>> for OwnedBuf {
         OwnedBuf {
             data,
             dtor: drop_vec,
+            user_data: ptr::null(),
             capacity,
             filled: len,
             init: len,
@@ -338,6 +350,7 @@ impl From<Vec<u8>> for OwnedBuf {
         OwnedBuf {
             data: data as *mut MaybeUninit<u8>,
             dtor: drop_vec,
+            user_data: ptr::null(),
             capacity,
             filled: len,
             init: len,
